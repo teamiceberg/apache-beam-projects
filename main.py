@@ -19,11 +19,16 @@
 
 # pytype: skip-file
 
+# code snippet to be executed only once
+# before the stmt parameter in timeit
+
 import argparse
 import logging
 import re
+import time
 
 import apache_beam as beam
+from apache_beam import Pipeline
 from apache_beam.io import ReadFromText
 from apache_beam.io import WriteToText
 from apache_beam.metrics import Metrics
@@ -32,20 +37,23 @@ from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.options.pipeline_options import SetupOptions
 
 
-class WordExtractingDoFn(beam.DoFn):
-  """Parse each line of input text into words."""
-  def __init__(self):
-    # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
-    # super().__init__()
-    beam.DoFn.__init__(self)
-    self.words_counter = Metrics.counter(self.__class__, 'words')
-    self.word_lengths_counter = Metrics.counter(self.__class__, 'word_lengths')
-    self.word_lengths_dist = Metrics.distribution(
-        self.__class__, 'word_len_dist')
-    self.empty_line_counter = Metrics.counter(self.__class__, 'empty_lines')
 
-  def process(self, element):
-    """Returns an iterator over the words of this element.
+
+class WordExtractingDoFn(beam.DoFn):
+    """Parse each line of input text into words."""
+
+    def __init__(self):
+        # TODO(BEAM-6158): Revert the workaround once we can pickle super() on py3.
+        # super().__init__()
+        beam.DoFn.__init__(self)
+        self.words_counter = Metrics.counter(self.__class__, 'words')
+        self.word_lengths_counter = Metrics.counter(self.__class__, 'word_lengths')
+        self.word_lengths_dist = Metrics.distribution(
+            self.__class__, 'word_len_dist')
+        self.empty_line_counter = Metrics.counter(self.__class__, 'empty_lines')
+
+    def process(self, element):
+        """Returns an iterator over the words of this element.
 
     The element is a line of text.  If the line is blank, note that, too.
 
@@ -55,83 +63,87 @@ class WordExtractingDoFn(beam.DoFn):
     Returns:
       The processed element.
     """
-    text_line = element.strip()
-    if not text_line:
-      self.empty_line_counter.inc(1)
-    words = re.findall(r'[\w\']+', text_line, re.UNICODE)
-    for w in words:
-      self.words_counter.inc()
-      self.word_lengths_counter.inc(len(w))
-      self.word_lengths_dist.update(len(w))
-    return words
+        text_line = element.strip()
+        if not text_line:
+            self.empty_line_counter.inc(1)
+        words = re.findall(r'[\w\']+', text_line, re.UNICODE)
+        for w in words:
+            self.words_counter.inc()
+            self.word_lengths_counter.inc(len(w))
+            self.word_lengths_dist.update(len(w))
+        return words
 
 
 def main(argv=None, save_main_session=True):
-  """Main entry point; defines and runs the wordcount pipeline."""
-  parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--input',
-      dest='input',
-      default='gs://dataflow-samples/shakespeare/kinglear.txt',
-      help='Input file to process.')
-  parser.add_argument(
-      '--output',
-      dest='output',
-      required=True,
-      help='Output file to write results to.')
-  known_args, pipeline_args = parser.parse_known_args(argv)
+    """Main entry point; defines and runs the wordcount pipeline."""
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--input',
+        dest='input',
+        default='InputData/shakespear_100k_words.txt',
+        help='Input file to process.')
+    parser.add_argument(
+        '--output',
+        dest='output',
+        required=True,
+        help='Output file to write results to.')
+    known_args, pipeline_args = parser.parse_known_args(argv)
 
-  # We use the save_main_session option because one or more DoFn's in this
-  # workflow rely on global context (e.g., a module imported at module level).
-  pipeline_options = PipelineOptions(pipeline_args)
-  pipeline_options.view_as(SetupOptions).save_main_session = save_main_session
-  p = beam.Pipeline(options=pipeline_options)
+    # We use the save_main_session option because one or more DoFn's in this
+    # workflow rely on global context (e.g., a module imported at module level).
+    pipeline_options = PipelineOptions(pipeline_args)
+    pipeline_options.view_as(SetupOptions).save_main_session = save_main_session
+    p: Pipeline = beam.Pipeline(options=pipeline_options)
 
-  # Read the text file[pattern] into a PCollection.
-  lines = p | 'read' >> ReadFromText(known_args.input)
+    # Read the text file[pattern] into a PCollection.
+    lines = p | 'read' >> ReadFromText(known_args.input)
 
-  # Count the occurrences of each word.
-  def count_ones(word_ones):
-    (word, ones) = word_ones
-    return (word, sum(ones))
+    # Count the occurrences of each word.
+    def count_ones(word_ones):
+        (word, ones) = word_ones
+        return (word, sum(ones))
 
-  counts = (
-      lines
-      | 'split' >> (beam.ParDo(WordExtractingDoFn()).with_output_types(str))
-      | 'pair_with_one' >> beam.Map(lambda x: (x, 1))
-      | 'group' >> beam.GroupByKey()
-      | 'count' >> beam.Map(count_ones))
+    counts = (
+            lines
+            | 'split' >> (beam.ParDo(WordExtractingDoFn()).with_output_types(str))
+            | 'pair_with_one' >> beam.Map(lambda x: (x, 1))
+            | 'group' >> beam.GroupByKey()
+            | 'count' >> beam.Map(count_ones))
 
-  # Format the counts into a PCollection of strings.
-  def format_result(word_count):
-    (word, count) = word_count
-    return '%s: %d' % (word, count)
+    # Format the counts into a PCollection of strings.
+    def format_result(word_count):
+        (word, count) = word_count
+        return '%s: %d' % (word, count)
 
-  output = counts | 'format' >> beam.Map(format_result)
+    output = counts | 'format' >> beam.Map(format_result)
 
-  # Write the output using a "Write" transform that has side effects.
-  # pylint: disable=expression-not-assigned
-  output | 'write' >> WriteToText(known_args.output)
+    # Write the output using a "Write" transform that has side effects.
+    # pylint: disable=expression-not-assigned
+    output | 'write' >> WriteToText(known_args.output)
 
-  result = p.run()
-  result.wait_until_finish()
+    result = p.run()
+    result.wait_until_finish()
 
-  # Do not query metrics when creating a template which doesn't run
-  if (not hasattr(result, 'has_job')  # direct runner
-      or result.has_job):  # not just a template creation
-    empty_lines_filter = MetricsFilter().with_name('empty_lines')
-    query_result = result.metrics().query(empty_lines_filter)
-    if query_result['counters']:
-      empty_lines_counter = query_result['counters'][0]
-      logging.info('number of empty lines: %d', empty_lines_counter.result)
+    # Do not query metrics when creating a template which doesn't run
+    if (not hasattr(result, 'has_job')  # direct runner
+            or result.has_job):  # not just a template creation
+        empty_lines_filter = MetricsFilter().with_name('empty_lines')
+        query_result = result.metrics().query(empty_lines_filter)
+        if query_result['counters']:
+            empty_lines_counter = query_result['counters'][0]
+            logging.info('number of empty lines: %d', empty_lines_counter.result)
 
-    word_lengths_filter = MetricsFilter().with_name('word_len_dist')
-    query_result = result.metrics().query(word_lengths_filter)
-    if query_result['distributions']:
-      word_lengths_dist = query_result['distributions'][0]
-      logging.info('average word length: %d', word_lengths_dist.result.mean)
+        word_lengths_filter = MetricsFilter().with_name('word_len_dist')
+        query_result = result.metrics().query(word_lengths_filter)
+        if query_result['distributions']:
+            word_lengths_dist = query_result['distributions'][0]
+            logging.info('average word length: %d', word_lengths_dist.result.mean)
 
 
 if __name__ == '__main__':
-  logging.getLogger().setLevel(logging.INFO)
-  main()
+    start = time.time()
+    logging.getLogger().setLevel(logging.INFO)
+    main()
+    end = time.time()
+    print("program exec time:%f seconds" %(end - start))
